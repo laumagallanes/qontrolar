@@ -1,6 +1,14 @@
 import { html } from '../lib/html.js';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { OPERATIONAL_DISCLAIMER } from '../lib/regulatory.js';
 import { STATUS_LABELS } from '../lib/format.js';
+
+// The CDN can cache /static/css/app.css beyond a deploy. A content digest gives
+// every CSS revision a fresh URL without a manual version bump.
+const CSS_VERSION = createHash('sha256')
+  .update(readFileSync(new URL('../../public/css/app.css', import.meta.url)))
+  .digest('hex').slice(0, 12);
 
 const NAV = [
   ['/', 'Tablero'],
@@ -42,7 +50,7 @@ ${refreshSeconds ? html`<meta http-equiv="refresh" content="${refreshSeconds}">`
 <link rel="icon" type="image/png" sizes="32x32" href="/static/brand/favicon-32.png">
 <link rel="icon" type="image/png" sizes="192x192" href="/static/brand/favicon-192.png">
 <link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png">
-<link rel="stylesheet" href="/static/css/app.css">
+<link rel="stylesheet" href="/static/css/app.css?v=${CSS_VERSION}">
 </head>
 <body class="${variant ? `page-${variant}` : ''}${demo ? ' is-demo' : ''}">
 <a class="skip-link" href="#main">Saltar al contenido</a>

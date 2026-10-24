@@ -166,6 +166,13 @@ test('panel: logout invalida la sesión en el servidor', async () => {
   assert.equal(res.status, 303);
 });
 
+test('panel: stylesheet versionado evita reutilizar CSS anterior del CDN', async () => {
+  const b = browser(srv.base);
+  const res = await b.get('/login');
+  assert.equal(res.status, 200);
+  assert.match(res.text, /href="\/static\/css\/app\.css\?v=[a-z0-9-]+"/);
+});
+
 test('panel: cabeceras de seguridad y escape de HTML', async () => {
   const b = browser(srv.base);
   await b.login(ctx.adminEmail, ctx.password);
