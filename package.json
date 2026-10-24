@@ -1,0 +1,28 @@
+{
+  "name": "qontrolar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QontrolAR - monitoreo IoT de temperatura y cadena de frío para comercios (MVP)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node src/cli/migrate.js",
+    "create-admin": "node src/cli/create-admin.js",
+    "seed:demo": "node src/cli/seed-demo.js",
+    "simulate": "node src/cli/simulate-device.js",
+    "demo:worker": "node src/cli/demo-worker.js",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"",
+    "check": "node scripts/check-syntax.js && npm test"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11"
+  }
+}

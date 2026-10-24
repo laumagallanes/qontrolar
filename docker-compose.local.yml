@@ -1,0 +1,5 @@
+# Local-only port mappings. Dokploy deploys docker-compose.yml without this override.
+services:
+  app:
+    ports:
+      - "127.0.0.1:3000:3000"

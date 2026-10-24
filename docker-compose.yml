@@ -1,0 +1,185 @@
+# QontrolAR – despliegue con Docker Compose.
+#   cp .env.example .env   # completar secretos
+#   docker compose up -d --build
+#
+# Servicios:
+#   app            panel web + API de ingesta (Node.js)
+#   app-db         PostgreSQL exclusivo de QontrolAR
+#   evolution-api  gateway de WhatsApp (Evolution API v2)
+#   evolution-db   PostgreSQL exclusivo de Evolution API
+#   demo-worker    simulador de la organización DEMO (perfil opt-in `demo`)
+# Cada base de datos tiene su propio volumen y su propia red interna.
+# Evolution queda en un perfil opt-in y con imagen inválida por defecto: no activar hasta
+# fijar una versión upstream corregida y revisar su estado de seguridad.
+
+version: "3.9"
+
+services:
+  app:
+    build: .
+    image: qontrolar-app:local
+    restart: unless-stopped
+    init: true
+    depends_on:
+      app-db:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      HOST: 0.0.0.0
+      DATABASE_URL: postgres://${APP_POSTGRES_USER:-qontrolar}:${APP_POSTGRES_PASSWORD:?definir APP_POSTGRES_PASSWORD en .env}@app-db:5432/${APP_POSTGRES_DB:-qontrolar}
+      PUBLIC_URL: ${PUBLIC_URL:?definir PUBLIC_URL en .env}
+      APP_TIMEZONE: ${APP_TIMEZONE:-America/Argentina/Buenos_Aires}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+      OFFLINE_CHECK_INTERVAL_SECONDS: ${OFFLINE_CHECK_INTERVAL_SECONDS:-60}
+      INGEST_RATE_LIMIT_PER_MINUTE: ${INGEST_RATE_LIMIT_PER_MINUTE:-120}
+      READING_RETENTION_DAYS: ${READING_RETENTION_DAYS:-0}
+      EVOLUTION_API_URL: http://evolution-api:8080
+      EVOLUTION_API_KEY: ${QONTROLAR_EVOLUTION_API_KEY:-}
+      EVOLUTION_INSTANCE: ${EVOLUTION_INSTANCE:-qontrolar}
+      EVOLUTION_TIMEOUT_MS: ${EVOLUTION_TIMEOUT_MS:-10000}
+    expose:
+      - "3000"
+    networks:
+      - app-backend
+      - app-edge
+      - whatsapp
+
+  # Simulador de la organización DEMO aislada (datos ficticios). Opt-in: COMPOSE_PROFILES=...,demo
+  # DEMO_EMAIL / DEMO_PASSWORD se cargan sólo en el entorno de Dokploy. No se usa `:?` porque
+  # Compose interpola también los perfiles apagados; el worker falla cerrado si faltan o son
+  # placeholders. Sin variables ni red de Evolution: no puede alcanzar WhatsApp. Sin puertos.
+  demo-worker:
+    build: .
+    image: qontrolar-app:local
+    profiles: ["demo"]
+    restart: on-failure:5
+    init: true
+    command: ["node", "src/cli/demo-worker.js"]
+    # El HEALTHCHECK HTTP de la imagen es del panel; el worker no escucha puertos.
+    healthcheck:
+      disable: true
+    depends_on:
+      app-db:
+        condition: service_healthy
+    environment:
+      QONTROLAR_DEMO_ENABLED: "true"
+      DATABASE_URL: postgres://${APP_POSTGRES_USER:-qontrolar}:${APP_POSTGRES_PASSWORD:?definir APP_POSTGRES_PASSWORD en .env}@app-db:5432/${APP_POSTGRES_DB:-qontrolar}
+      APP_TIMEZONE: ${APP_TIMEZONE:-America/Argentina/Buenos_Aires}
+      DEMO_EMAIL: ${DEMO_EMAIL:-}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+      DEMO_INTERVAL_SECONDS: ${DEMO_INTERVAL_SECONDS:-60}
+      EVOLUTION_API_URL: ""
+      EVOLUTION_API_KEY: ""
+    networks:
+      - app-backend
+
+  app-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${APP_POSTGRES_DB:-qontrolar}
+      POSTGRES_USER: ${APP_POSTGRES_USER:-qontrolar}
+      POSTGRES_PASSWORD: ${APP_POSTGRES_PASSWORD:?definir APP_POSTGRES_PASSWORD en .env}
+    volumes:
+      - qontrolar-app-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app-backend
+
+  evolution-api:
+    image: ${EVOLUTION_IMAGE:-qontrolar-evolution-unconfigured:latest}
+    profiles: ["whatsapp"]
+    restart: unless-stopped
+    depends_on:
+      evolution-db:
+        condition: service_healthy
+    environment:
+      SERVER_TYPE: http
+      SERVER_PORT: 8080
+      SERVER_URL: ${EVOLUTION_SERVER_URL:-http://localhost:8080}
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?definir EVOLUTION_API_KEY en .env}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "false"
+      DEL_INSTANCE: "false"
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${EVOLUTION_POSTGRES_USER:-evolution}:${EVOLUTION_POSTGRES_PASSWORD:?definir EVOLUTION_POSTGRES_PASSWORD en .env}@evolution-db:5432/${EVOLUTION_POSTGRES_DB:-evolution}?schema=public
+      DATABASE_CONNECTION_CLIENT_NAME: qontrolar_evolution
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      # QontrolAR sólo envía alertas: no se almacenan mensajes, chats ni contactos.
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "false"
+      DATABASE_SAVE_MESSAGE_UPDATE: "false"
+      DATABASE_SAVE_DATA_CONTACTS: "false"
+      DATABASE_SAVE_DATA_CHATS: "false"
+      DATABASE_SAVE_DATA_LABELS: "false"
+      DATABASE_SAVE_DATA_HISTORIC: "false"
+      CACHE_REDIS_ENABLED: "false"
+      CACHE_LOCAL_ENABLED: "true"
+      CONFIG_SESSION_PHONE_CLIENT: QontrolAR
+      CONFIG_SESSION_PHONE_NAME: Chrome
+      LOG_LEVEL: ERROR,WARN,INFO
+    volumes:
+      - qontrolar-evolution-instances:/evolution/instances
+    # Sólo localhost: no exponer Evolution API a Internet.
+    ports:
+      - "${EVOLUTION_BIND:-127.0.0.1:18088}:8080"
+    networks:
+      - whatsapp
+      - evolution-backend
+      - evolution-egress
+
+  evolution-db:
+    image: postgres:17-alpine
+    profiles: ["whatsapp"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${EVOLUTION_POSTGRES_DB:-evolution}
+      POSTGRES_USER: ${EVOLUTION_POSTGRES_USER:-evolution}
+      POSTGRES_PASSWORD: ${EVOLUTION_POSTGRES_PASSWORD:?definir EVOLUTION_POSTGRES_PASSWORD en .env}
+    volumes:
+      - qontrolar-evolution-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - evolution-backend
+
+  # Public ingress is a dedicated, app-scoped Cloudflare Tunnel.
+  # Activate with COMPOSE_PROFILES=tunnel and provide CLOUDFLARED_TOKEN in Dokploy.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.3
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --protocol http2 run --token ${CLOUDFLARED_TOKEN:?definir CLOUDFLARED_TOKEN en el entorno de Dokploy}
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - app-edge
+      - tunnel-egress
+
+volumes:
+  qontrolar-app-db:
+  qontrolar-evolution-db:
+  qontrolar-evolution-instances:
+
+networks:
+  app-backend:
+    internal: true
+  app-edge:
+    internal: true
+  whatsapp:
+    internal: true
+  evolution-backend:
+    internal: true
+  evolution-egress:
+    driver: bridge
+  tunnel-egress:
+    driver: bridge
