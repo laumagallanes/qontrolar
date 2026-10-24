@@ -9,6 +9,7 @@ const MIGRATIONS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url))
  *   query(text, params) -> { rows }
  *   exec(sql)            -> ejecuta SQL multi-sentencia (migraciones)
  *   tx(fn)               -> ejecuta fn(q) dentro de una transacción
+ *   withLock(key, fn)    -> ejecuta fn() en exclusión mutua entre procesos (no reentrante)
  *   close()
  *
  * En producción se usa PostgreSQL (driver `pg`). Para tests y desarrollo sin Docker
@@ -45,6 +46,22 @@ async function createPg(databaseUrl) {
         client.release();
       }
     },
+    // Advisory lock de sesión en una conexión dedicada, retenida mientras fn() consulta vía pool.
+    async withLock(key, fn) {
+      const client = await pool.connect();
+      let unlocked = false;
+      try {
+        await client.query('SELECT pg_advisory_lock($1)', [key]);
+        try {
+          return await fn();
+        } finally {
+          unlocked = await client.query('SELECT pg_advisory_unlock($1)', [key]).then(() => true, () => false);
+        }
+      } finally {
+        // Si no se pudo desbloquear se descarta la conexión: cerrar la sesión libera el lock.
+        client.release(unlocked ? undefined : true);
+      }
+    },
     close: () => pool.end(),
   };
 }
@@ -61,6 +78,7 @@ async function createPglite(databaseUrl) {
   await db.waitReady;
   // PGlite es de conexión única: serializamos transacciones para evitar intercalado.
   let chain = Promise.resolve();
+  let lockChain = Promise.resolve();
   return {
     kind: 'pglite',
     query: (text, params) => db.query(text, params),
@@ -68,6 +86,12 @@ async function createPglite(databaseUrl) {
     tx(fn) {
       const run = chain.then(() => db.transaction((t) => fn({ query: (q, p) => t.query(q, p) })));
       chain = run.catch(() => {});
+      return run;
+    },
+    // Un único proceso por base PGlite: basta un mutex en memoria por instancia (serializa todas las claves).
+    withLock(_key, fn) {
+      const run = lockChain.then(() => fn());
+      lockChain = run.catch(() => {});
       return run;
     },
     close: () => db.close(),

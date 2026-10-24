@@ -16,6 +16,8 @@ export const DEMO_ORG_NAME = 'Qontrol.ar DEMO · comercios ficticios';
 /** Firmware con el que se marcan los sensores simulados; el simulador sólo escribe en éstos. */
 export const DEMO_FIRMWARE = 'demo-simulador';
 export const MIN_DEMO_PASSWORD_LENGTH = 12;
+/** Clave del lock exclusivo entre procesos (seed:demo, demo-worker) para las operaciones demo. */
+export const DEMO_LOCK_KEY = 727275;
 
 const HOUR = 3600000;
 const MIN = 60000;
@@ -71,11 +73,15 @@ export function demoCredentialsFromEnv(env = process.env) {
   if (!/^[^\s@]+@[^\s@]+$/.test(email) || email.length > 200) {
     throw new Error('Defina DEMO_EMAIL (email del usuario demo) en el entorno del servidor.');
   }
+  // Obligatoria siempre, aunque la demo ya exista: sin ella no se arranca con una credencial vieja.
   const password = env.DEMO_PASSWORD ? String(env.DEMO_PASSWORD) : null;
-  if (password !== null && password.length < MIN_DEMO_PASSWORD_LENGTH) {
+  if (password === null) {
+    throw new Error('Defina DEMO_PASSWORD (secreto del usuario demo) en el entorno del servidor.');
+  }
+  if (password.length < MIN_DEMO_PASSWORD_LENGTH) {
     throw new Error(`DEMO_PASSWORD debe tener al menos ${MIN_DEMO_PASSWORD_LENGTH} caracteres.`);
   }
-  if (password !== null && /change[_-]?me/i.test(password)) {
+  if (/change[_-]?me/i.test(password)) {
     throw new Error('DEMO_PASSWORD contiene un valor de ejemplo; defina un secreto real en el entorno del servidor.');
   }
   return { email, password };
@@ -176,17 +182,33 @@ async function ensureDemoStructure(db, org) {
   return created;
 }
 
+/** Rechaza un DEMO_EMAIL de un usuario real antes de crear nada (ni siquiera la organización demo). */
+async function assertEmailNotReal(db, email) {
+  const { rows } = await db.query(
+    'SELECT o.is_demo FROM users u JOIN organizations o ON o.id = u.organization_id WHERE lower(u.email) = $1', [email],
+  );
+  if (rows.length && !rows[0].is_demo) {
+    throw new Error('DEMO_EMAIL ya pertenece a una organización real; use un email exclusivo para la demo.');
+  }
+}
+
 /**
  * Crea (o completa) la organización demo, su usuario y su estructura, y escribe el
- * historial inicial. Idempotente: ejecutarlo varias veces no duplica filas.
+ * historial inicial. Idempotente: ejecutarlo varias veces no duplica filas. Se ejecuta
+ * con el lock demo, así que llamadas concurrentes (incluso desde otros procesos) se serializan.
  */
 export async function seedDemo(db, { email, password = null, now = new Date(), backfillHours = 24, stepMinutes = 5, rng = Math.random } = {}) {
   if (!email) throw new Error('Falta el email del usuario demo.');
-  const org = await ensureDemoOrg(db);
-  const user = await ensureDemoUser(db, org, { email: email.toLowerCase(), password });
-  const created = await ensureDemoStructure(db, org);
-  const advanced = await advanceDemo(db, { now, backfillHours, stepMinutes, rng });
-  return { organizationId: org.id, user, created, ...advanced };
+  return db.withLock(DEMO_LOCK_KEY, async () => {
+    const normalized = email.toLowerCase();
+    await assertEmailNotReal(db, normalized);
+    const org = await ensureDemoOrg(db);
+    const user = await ensureDemoUser(db, org, { email: normalized, password });
+    const created = await ensureDemoStructure(db, org);
+    // Ya dentro del lock: se usa la variante sin lock (el lock no es reentrante).
+    const advanced = await advanceDemoUnlocked(db, { now, backfillHours, stepMinutes, rng });
+    return { organizationId: org.id, user, created, ...advanced };
+  });
 }
 
 /**
@@ -195,8 +217,13 @@ export async function seedDemo(db, { email, password = null, now = new Date(), b
  *  - 'ok' / 'excursion': lecturas cada `stepMinutes` hasta ahora.
  *  - 'offline': sólo se escribe el historial inicial y luego deja de reportar (la tarea de
  *    fondo de la app abre la alerta de desconexión).
+ * Se ejecuta con el lock demo: dos ciclos concurrentes no escriben el mismo punto/instante.
  */
-export async function advanceDemo(db, { now = new Date(), backfillHours = 24, stepMinutes = 5, rng = Math.random } = {}) {
+export function advanceDemo(db, opts = {}) {
+  return db.withLock(DEMO_LOCK_KEY, () => advanceDemoUnlocked(db, opts));
+}
+
+async function advanceDemoUnlocked(db, { now = new Date(), backfillHours = 24, stepMinutes = 5, rng = Math.random } = {}) {
   const { rows: devices } = await db.query(
     `SELECT d.*, p.name AS point_name, l.name AS location_name, p.last_reading_at
        FROM devices d

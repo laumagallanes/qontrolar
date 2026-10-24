@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { createTestDb, seedBasic, fakeFetch, silentLogger, startApp, browser } from './helpers.js';
@@ -69,8 +70,9 @@ test('credenciales demo: se exigen desde el entorno y nunca aparecen en errores'
   });
   assert.throws(() => demoCredentialsFromEnv({ DEMO_EMAIL: EMAIL, DEMO_PASSWORD: 'CHANGE_ME_demo_password' }), /valor de ejemplo/);
   assert.deepEqual(demoCredentialsFromEnv({ DEMO_EMAIL: ' Demo@Test.Local ', DEMO_PASSWORD: PASSWORD }), { email: EMAIL, password: PASSWORD });
-  // Sin contraseña sólo se puede reutilizar un usuario demo existente.
-  assert.deepEqual(demoCredentialsFromEnv({ DEMO_EMAIL: EMAIL }), { email: EMAIL, password: null });
+  // DEMO_PASSWORD es obligatoria siempre, aunque el usuario demo ya exista (falla cerrado).
+  assert.throws(() => demoCredentialsFromEnv({ DEMO_EMAIL: EMAIL }), /DEMO_PASSWORD/);
+  assert.throws(() => demoCredentialsFromEnv({ DEMO_EMAIL: EMAIL, DEMO_PASSWORD: '' }), /DEMO_PASSWORD/);
 });
 
 test('credenciales demo: no hay contraseñas por defecto en el código ni en Compose', () => {
@@ -96,7 +98,8 @@ test('seedDemo sin contraseña no crea usuario demo nuevo', async () => {
 
 test('seedDemo rechaza un DEMO_EMAIL que pertenece a una organización real', async () => {
   await assert.rejects(seedDemo(db, { email: real.adminEmail, password: PASSWORD, now: NOW, rng: fixedRng }), /organización real/);
-  // La organización demo pudo crearse vacía, pero el usuario real no se tocó.
+  // No queda una organización demo vacía y el usuario real no se tocó.
+  assert.equal(await count('SELECT count(*) AS n FROM organizations WHERE is_demo'), 0);
   const u = (await db.query('SELECT organization_id, password_hash FROM users WHERE id = $1', [real.admin.id])).rows[0];
   assert.equal(u.organization_id, real.org.id);
   assert.equal(u.password_hash, real.admin.password_hash);
@@ -223,6 +226,65 @@ test('escenario offline: la tarea de fondo abre UNA alerta de desconexión y no 
   assert.deepEqual([...new Set(fetchImpl.calls.map((c) => c.body.number))], ['5493410000099']);
 });
 
+// ------------------------------------------------------------- concurrencia
+
+/** Base aislada con una organización real para verificar que las operaciones demo concurrentes no la tocan. */
+async function withIsolatedDb(fn) {
+  const iso = await createTestDb();
+  try {
+    const r = await seedBasic(iso, { email: 'admin@real.local' });
+    await ingestReadings(iso, r.device, [{ temperature: 4, humidity: null, recorded_at: NOW }], { now: NOW });
+    const snapshot = async () => ({
+      readings: Number((await iso.query('SELECT count(*) AS n FROM readings WHERE monitored_point_id = $1', [r.point.id])).rows[0].n),
+      point: (await iso.query('SELECT last_reading_at, last_temperature FROM monitored_points WHERE id = $1', [r.point.id])).rows[0],
+      users: (await iso.query('SELECT id, password_hash FROM users WHERE organization_id = $1 ORDER BY id', [r.org.id])).rows,
+    });
+    const demoDupes = async () => Number((await iso.query(
+      `SELECT count(*) AS n FROM (
+         SELECT r.monitored_point_id, r.recorded_at FROM readings r
+           JOIN monitored_points p ON p.id = r.monitored_point_id JOIN organizations o ON o.id = p.organization_id
+          WHERE o.is_demo GROUP BY 1, 2 HAVING count(*) > 1) d`,
+    )).rows[0].n);
+    await fn({ iso, snapshot, demoDupes });
+  } finally {
+    await iso.close();
+  }
+}
+
+test('dos seedDemo concurrentes con las mismas credenciales e instante: ambos terminan sin duplicar', async () => {
+  await withIsolatedDb(async ({ iso, snapshot, demoDupes }) => {
+    const before = await snapshot();
+    const opts = { email: EMAIL, password: PASSWORD, now: NOW, rng: fixedRng };
+    const results = await Promise.allSettled([seedDemo(iso, opts), seedDemo(iso, opts)]);
+    assert.deepEqual(results.map((r) => r.status), ['fulfilled', 'fulfilled'], results.map((r) => r.reason?.message).join(' | '));
+    assert.deepEqual(results.map((r) => r.value.user).sort(), ['created', 'existing']);
+    assert.equal(Number((await iso.query('SELECT count(*) AS n FROM organizations WHERE is_demo')).rows[0].n), 1);
+    assert.equal(Number((await iso.query('SELECT count(*) AS n FROM users WHERE email = $1', [EMAIL])).rows[0].n), 1);
+    assert.equal(Number((await iso.query(
+      'SELECT count(*) AS n FROM devices d JOIN organizations o ON o.id = d.organization_id WHERE o.is_demo',
+    )).rows[0].n), 8);
+    assert.equal(await demoDupes(), 0);
+    assert.deepEqual(await snapshot(), before, 'la organización real no cambia');
+  });
+});
+
+test('dos advanceDemo concurrentes tras 30 min: ambos terminan y no duplican lecturas demo', async () => {
+  await withIsolatedDb(async ({ iso, snapshot, demoDupes }) => {
+    await seedDemo(iso, { email: EMAIL, password: PASSWORD, now: NOW, rng: fixedRng });
+    const before = await snapshot();
+    const later = new Date(NOW.getTime() + 30 * MIN);
+    const results = await Promise.allSettled([
+      advanceDemo(iso, { now: later, rng: fixedRng }),
+      advanceDemo(iso, { now: later, rng: fixedRng }),
+    ]);
+    assert.deepEqual(results.map((r) => r.status), ['fulfilled', 'fulfilled'], results.map((r) => r.reason?.message).join(' | '));
+    // Entre ambos se escriben exactamente los 7 x 6 pasos nuevos, sin repetir punto/instante.
+    assert.equal(results.reduce((n, r) => n + r.value.readings, 0), 7 * 6);
+    assert.equal(await demoDupes(), 0);
+    assert.deepEqual(await snapshot(), before, 'la organización real no cambia');
+  });
+});
+
 // ------------------------------------------------------------- panel
 
 test('login del usuario demo: el panel se rotula DEMO con datos simulados; el real no', async () => {
@@ -270,4 +332,31 @@ test('seed:demo CLI no imprime la contraseña ni tokens', async () => {
     }),
     (err) => err.code === 1 && /DEMO_EMAIL/.test(err.stderr),
   );
+});
+
+test('demo-worker falla cerrado sin DEMO_PASSWORD aunque la demo ya esté sembrada', async () => {
+  const run = promisify(execFile);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qontrolar-demo-worker-'));
+  try {
+    const databaseUrl = `pglite://${dir}`;
+    await run(process.execPath, [path.join(ROOT, 'src/cli/seed-demo.js')], {
+      cwd: ROOT, env: { PATH: process.env.PATH, DATABASE_URL: databaseUrl, DEMO_EMAIL: EMAIL, DEMO_PASSWORD: PASSWORD }, timeout: 60000,
+    });
+    await assert.rejects(
+      run(process.execPath, [path.join(ROOT, 'src/cli/demo-worker.js')], {
+        cwd: ROOT,
+        env: { PATH: process.env.PATH, DATABASE_URL: databaseUrl, QONTROLAR_DEMO_ENABLED: 'true', DEMO_EMAIL: EMAIL },
+        timeout: 20000,
+      }),
+      (err) => {
+        assert.equal(err.killed, false, 'el worker no debe arrancar con la credencial anterior');
+        assert.equal(err.code, 1);
+        assert.match(err.stderr, /DEMO_PASSWORD/);
+        assert.ok(!(err.stdout + err.stderr).includes(PASSWORD));
+        return true;
+      },
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
