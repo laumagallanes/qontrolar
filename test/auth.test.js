@@ -166,6 +166,20 @@ test('panel: logout invalida la sesión en el servidor', async () => {
   assert.equal(res.status, 303);
 });
 
+test('configuración: WhatsApp desactivado no ofrece enviar pruebas y avisa que no hay alertas', async () => {
+  const disabled = await startApp({ db, evolution: { url: '', apiKey: '', instance: '' } });
+  try {
+    const b = browser(disabled.base);
+    await b.login(ctx.adminEmail, ctx.password);
+    const res = await b.get('/configuracion');
+    assert.equal(res.status, 200);
+    assert.match(res.text, /WhatsApp está desactivado: no se envían alertas ni mensajes de prueba/);
+    assert.doesNotMatch(res.text, /action="\/configuracion\/whatsapp\/prueba"/);
+  } finally {
+    await disabled.close();
+  }
+});
+
 test('panel: stylesheet versionado evita reutilizar CSS anterior del CDN', async () => {
   const b = browser(srv.base);
   const res = await b.get('/login');

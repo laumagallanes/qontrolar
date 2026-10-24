@@ -358,13 +358,16 @@ export function settingsPage(req, { org, whatsapp, connState, notifications, err
 </section>
 <section class="card">
   <h2>WhatsApp (Evolution API)</h2>
+  ${!whatsapp.configured ? html`<p class="help" role="status"><strong>WhatsApp está desactivado: no se envían alertas ni mensajes de prueba.</strong> Los destinatarios se pueden guardar para cuando se habilite una instancia segura.</p>` : ''}
+  ${whatsapp.configured && connState !== 'Vinculado (open)' ? html`<p class="help" role="status"><strong>La instancia de WhatsApp no está vinculada.</strong> Los envíos no están disponibles hasta confirmar su conexión.</p>` : ''}
+  ${req.org?.is_demo ? html`<p class="help" role="status">Esta organización DEMO no envía mensajes reales, aunque el proveedor esté configurado.</p>` : ''}
   <dl class="kv">
     <dt>Configurado en el servidor</dt><dd>${whatsapp.configured ? 'Sí' : 'No — defina EVOLUTION_API_URL, EVOLUTION_API_KEY y EVOLUTION_INSTANCE'}</dd>
     ${whatsapp.configured ? html`<dt>Instancia</dt><dd><code>${whatsapp.instance}</code></dd>
     <dt>Estado de la sesión</dt><dd>${connState}</dd>` : ''}
   </dl>
   <p class="help">Las credenciales se leen de variables de entorno del servidor y nunca se envían al navegador. La API sólo debe administrarse por una red privada; consultá la documentación del repositorio antes de vincular un número.</p>
-  ${isAdmin(req) ? html`<form method="post" action="/configuracion/whatsapp/prueba" class="form inline-form">
+  ${isAdmin(req) && whatsapp.configured && connState === 'Vinculado (open)' && !req.org?.is_demo ? html`<form method="post" action="/configuracion/whatsapp/prueba" class="form inline-form">
     ${csrfField(req)}
     <label>Enviar mensaje de prueba a <input name="to" value="${org.alert_phones[0] || ''}" required placeholder="5493411234567"></label>
     <button type="submit" class="btn">Enviar prueba</button>
