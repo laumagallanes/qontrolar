@@ -1,10 +1,14 @@
 # QontrolAR
 
-Monitoreo IoT de cadena de frío para comercios. Registra lecturas, muestra estado e historial por punto, detecta excursiones de temperatura y sensores sin conexión, y puede notificar por WhatsApp mediante Evolution API cuando se habilite una versión segura del proveedor.
+Plataforma IoT modular para comercios: la idea es que un nodo ESP32 pueda integrarse con distintos sensores según lo que cada negocio necesite medir. El primer y, por ahora, único módulo operativo es **Qontrol Frío**, monitoreo de cadena de frío: registra lecturas, muestra estado e historial por punto, detecta excursiones de temperatura y sensores sin conexión, y puede notificar por WhatsApp mediante Evolution API cuando se habilite una versión segura del proveedor.
+
+Otras variables (energía, puertas, agua, gas, consumo) son módulos futuros separados, que dependen del sensor, la instalación y su desarrollo; no están implementadas. Ver [`docs/vision-plataforma-iot.md`](docs/vision-plataforma-iot.md).
 
 > **Alcance:** QontrolAR es una herramienta operativa de prevención y registro interno. No certifica instalaciones, no garantiza cumplimiento normativo y no sustituye inspecciones, alarmas locales, termómetros requeridos ni planes de contingencia. Ver [`docs/referencias-regulatorias.md`](docs/referencias-regulatorias.md).
 
 ## Qué incluye
+
+Todo lo que sigue corresponde al módulo Qontrol Frío, el único implementado hoy:
 
 - Panel en español con ubicaciones, puntos de frío, estado actual, gráfico e historial exportable a CSV.
 - Umbrales mínimo/máximo configurables por punto; no hay umbrales legales precargados.

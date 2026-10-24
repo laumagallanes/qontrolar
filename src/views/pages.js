@@ -22,6 +22,7 @@ export function loginPage(req, { error = null, next = '/', email = '' } = {}) {
     body: html`<section class="card narrow login-card">
   <img class="login-mark" src="/static/brand/qontrol-wordmark-login.png" alt="Qontrol.ar" width="252" height="72">
   <p class="login-product"><img src="/static/brand/qontrol-frio-icon.png" alt="" width="20" height="20"> Qontrol Frío · panel de monitoreo</p>
+  <p class="login-platform">Qontrol.ar es una plataforma IoT adaptable a cada comercio; Qontrol Frío es su primer módulo activo.</p>
   <h1>Ingresar</h1>
   ${error ? html`<div class="errors" role="alert">${error}</div>` : ''}
   <form method="post" action="/login" class="form">
